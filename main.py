@@ -1,25 +1,24 @@
 """
 ☕ Coffee Order AI Voice Agent
 --------------------------------
-Stack: Twilio (calls) + Claude AI (brain) + Flask (server)
-Deploy: Railway.app (free tier)
+Stack: Twilio (calls) + Gemini AI (brain) + Flask (server)
+Deploy: Render.com (free tier)
 """
 
 import os
-import json
-from flask import Flask, request, Response
+from functools import wraps
+from flask import Flask, request, Response, abort
 from twilio.twiml.voice_response import VoiceResponse, Gather
-import anthropic
+from twilio.request_validator import RequestValidator
+import google.generativeai as genai
 
 app = Flask(__name__)
 
 # ── Clients ──────────────────────────────────────────────────────────────────
-claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-# ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME = "Sidi BeBe"
-
-SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi BeBe
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+gemini = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction="""You are a friendly voice assistant for a coffee shop called Brew & Co.
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -40,30 +39,43 @@ RULES:
 - If they say no or goodbye, end with exactly: "CALL_COMPLETE: [order summary]"
 - Never make up menu items or prices
 - If asked something off-topic, politely redirect to coffee ordering"""
+)
 
-# In-memory session store  { call_sid: [messages] }
+twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
+
+# ── Config ────────────────────────────────────────────────────────────────────
+COFFEE_SHOP_NAME = "Brew & Co."
+
+# In-memory session store  { call_sid: chat_session }
 # For production → use Redis or a DB
-sessions: dict[str, list[dict]] = {}
+sessions: dict = {}
 
 
-def ask_claude(call_sid: str, user_message: str) -> str:
-    """Send user message to Claude, maintain conversation history."""
+# ── Twilio signature validation ───────────────────────────────────────────────
+def validate_twilio_request(f):
+    """Decorator — rejects any request that didn't genuinely come from Twilio."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        url = request.url
+        signature = request.headers.get("X-Twilio-Signature", "")
+        params = request.form.to_dict()
+        if not twilio_validator.validate(url, params, signature):
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def ask_gemini(call_sid: str, user_message: str) -> str:
+    """Send user message to Gemini, maintain chat session per call."""
+    # Create a new chat session if this is a new call
     if call_sid not in sessions:
-        sessions[call_sid] = []
+        sessions[call_sid] = gemini.start_chat(history=[])
 
-    sessions[call_sid].append({"role": "user", "content": user_message})
+    chat = sessions[call_sid]
+    response = chat.send_message(user_message)
 
-    response = claude.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=200,  # Keep responses short for voice
-        system=SYSTEM_PROMPT,
-        messages=sessions[call_sid],
-    )
-
-    assistant_reply = response.content[0].text
-    sessions[call_sid].append({"role": "assistant", "content": assistant_reply})
-
-    return assistant_reply
+    return response.text.strip()
 
 
 def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
@@ -71,7 +83,6 @@ def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
     response = VoiceResponse()
 
     if gather:
-        # Gather = speak + listen for speech input
         g = Gather(
             input="speech",
             action="/respond",
@@ -80,14 +91,16 @@ def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
             timeout=timeout,
             language="en-US",
         )
-        g.say(text, voice="Polly.Joanna")  # AWS Polly via Twilio — sounds natural
+        g.say(text, voice="Polly.Joanna")
         response.append(g)
 
-        # Fallback if no speech detected
-        response.say("I didn't catch that. Let me transfer you to our team. Goodbye!", voice="Polly.Joanna")
+        # Fallback if no speech detected after timeout
+        response.say(
+            "I didn't catch that. Let me transfer you to our team. Goodbye!",
+            voice="Polly.Joanna",
+        )
         response.hangup()
     else:
-        # Just speak and hang up
         response.say(text, voice="Polly.Joanna")
         response.pause(length=1)
         response.hangup()
@@ -99,16 +112,17 @@ def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check for Railway."""
+    """Health check for Render."""
     return {"status": "ok", "agent": COFFEE_SHOP_NAME}, 200
 
 
 @app.route("/incoming-call", methods=["POST"])
+@validate_twilio_request
 def incoming_call():
-    """Twilio hits this when someone calls your number."""
+    """Twilio hits this endpoint when someone calls your number."""
     call_sid = request.form.get("CallSid", "unknown")
 
-    # Clear any old session for this call
+    # Clear any old session for this call SID
     sessions.pop(call_sid, None)
 
     greeting = (
@@ -120,8 +134,9 @@ def incoming_call():
 
 
 @app.route("/respond", methods=["POST"])
+@validate_twilio_request
 def respond():
-    """Twilio sends the customer's speech transcript here."""
+    """Twilio sends the customer's transcribed speech here after each turn."""
     call_sid = request.form.get("CallSid", "unknown")
     speech_result = request.form.get("SpeechResult", "").strip()
 
@@ -129,22 +144,20 @@ def respond():
         fallback = "Sorry, I didn't catch that. Could you repeat your order?"
         return Response(twiml_response(fallback), mimetype="text/xml")
 
-    print(f"[{call_sid}] Customer said: {speech_result}")
+    print(f"[{call_sid}] Customer: {speech_result}")
 
-    # Get Claude's reply
-    reply = ask_claude(call_sid, speech_result)
+    reply = ask_gemini(call_sid, speech_result)
 
-    print(f"[{call_sid}] Agent replied: {reply}")
+    print(f"[{call_sid}] Agent: {reply}")
 
-    # Check if the order is complete
+    # Gemini signals order completion with this prefix
     if reply.startswith("CALL_COMPLETE:"):
         order_summary = reply.replace("CALL_COMPLETE:", "").strip()
         farewell = (
             f"Perfect! So your order is: {order_summary}. "
-            "Your order has been placed. Thank you for calling Sidi BeBe "
+            "Your order has been placed. Thank you for calling Brew & Co. "
             "See you soon!"
         )
-        # Clean up session
         sessions.pop(call_sid, None)
         return Response(twiml_response(farewell, gather=False), mimetype="text/xml")
 
@@ -152,12 +165,13 @@ def respond():
 
 
 @app.route("/status", methods=["POST"])
+@validate_twilio_request
 def call_status():
-    """Twilio calls this when a call ends — clean up session."""
+    """Twilio calls this when a call ends — used to clean up the session."""
     call_sid = request.form.get("CallSid", "unknown")
-    call_status = request.form.get("CallStatus", "unknown")
+    status = request.form.get("CallStatus", "unknown")
 
-    print(f"[{call_sid}] Call ended with status: {call_status}")
+    print(f"[{call_sid}] Call ended — status: {status}")
     sessions.pop(call_sid, None)
 
     return "", 204
