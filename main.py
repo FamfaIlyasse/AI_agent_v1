@@ -10,15 +10,20 @@ from functools import wraps
 from flask import Flask, request, Response, abort
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
 # ── Clients ──────────────────────────────────────────────────────────────────
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-gemini = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction="""You are a friendly voice assistant for a coffee shop called Brew & Co.
+gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
+
+# ── Config ────────────────────────────────────────────────────────────────────
+COFFEE_SHOP_NAME = "Sidi Bebe"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi Bebe
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -39,16 +44,9 @@ RULES:
 - If they say no or goodbye, end with exactly: "CALL_COMPLETE: [order summary]"
 - Never make up menu items or prices
 - If asked something off-topic, politely redirect to coffee ordering"""
-)
 
-twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
-
-# ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME = "Brew & Co."
-
-# In-memory session store  { call_sid: chat_session }
-# For production → use Redis or a DB
-sessions: dict = {}
+# In-memory session store { call_sid: [history] }
+sessions: dict[str, list] = {}
 
 
 # ── Twilio signature validation ───────────────────────────────────────────────
@@ -67,15 +65,32 @@ def validate_twilio_request(f):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def ask_gemini(call_sid: str, user_message: str) -> str:
-    """Send user message to Gemini, maintain chat session per call."""
-    # Create a new chat session if this is a new call
+    """Send user message to Gemini, maintain conversation history per call."""
     if call_sid not in sessions:
-        sessions[call_sid] = gemini.start_chat(history=[])
+        sessions[call_sid] = []
 
-    chat = sessions[call_sid]
-    response = chat.send_message(user_message)
+    # Append user turn
+    sessions[call_sid].append(
+        types.Content(role="user", parts=[types.Part(text=user_message)])
+    )
 
-    return response.text.strip()
+    response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=sessions[call_sid],
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=200,
+        ),
+    )
+
+    reply = response.text.strip()
+
+    # Append assistant turn
+    sessions[call_sid].append(
+        types.Content(role="model", parts=[types.Part(text=reply)])
+    )
+
+    return reply
 
 
 def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
@@ -93,8 +108,6 @@ def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
         )
         g.say(text, voice="Polly.Joanna")
         response.append(g)
-
-        # Fallback if no speech detected after timeout
         response.say(
             "I didn't catch that. Let me transfer you to our team. Goodbye!",
             voice="Polly.Joanna",
@@ -121,15 +134,12 @@ def health():
 def incoming_call():
     """Twilio hits this endpoint when someone calls your number."""
     call_sid = request.form.get("CallSid", "unknown")
-
-    # Clear any old session for this call SID
     sessions.pop(call_sid, None)
 
     greeting = (
         f"Hi, welcome to {COFFEE_SHOP_NAME}! "
         "I'm your virtual barista. What can I get started for you today?"
     )
-
     return Response(twiml_response(greeting), mimetype="text/xml")
 
 
@@ -150,12 +160,11 @@ def respond():
 
     print(f"[{call_sid}] Agent: {reply}")
 
-    # Gemini signals order completion with this prefix
     if reply.startswith("CALL_COMPLETE:"):
         order_summary = reply.replace("CALL_COMPLETE:", "").strip()
         farewell = (
             f"Perfect! So your order is: {order_summary}. "
-            "Your order has been placed. Thank you for calling Brew & Co. "
+            "Your order has been placed. Thank you for calling Sidi Bebe "
             "See you soon!"
         )
         sessions.pop(call_sid, None)
@@ -167,13 +176,11 @@ def respond():
 @app.route("/status", methods=["POST"])
 @validate_twilio_request
 def call_status():
-    """Twilio calls this when a call ends — used to clean up the session."""
+    """Twilio calls this when a call ends — clean up session."""
     call_sid = request.form.get("CallSid", "unknown")
     status = request.form.get("CallStatus", "unknown")
-
     print(f"[{call_sid}] Call ended — status: {status}")
     sessions.pop(call_sid, None)
-
     return "", 204
 
 
