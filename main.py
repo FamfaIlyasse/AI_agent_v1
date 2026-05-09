@@ -17,9 +17,9 @@ app = Flask(__name__)
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME = "Brew & Co."
+COFFEE_SHOP_NAME = "Sidi BeBe"
 
-SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Brew & Co.
+SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi BeBe
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -141,7 +141,7 @@ def respond():
         order_summary = reply.replace("CALL_COMPLETE:", "").strip()
         farewell = (
             f"Perfect! So your order is: {order_summary}. "
-            "Your order has been placed. Thank you for calling Brew & Co. "
+            "Your order has been placed. Thank you for calling Sidi BeBe "
             "See you soon!"
         )
         # Clean up session
