@@ -7,9 +7,10 @@ Deploy: Render.com (free tier)
 
 import os
 from functools import wraps
-from flask import Flask, request, Response, abort
+from flask import Flask, request, Response, abort, jsonify
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
+from twilio.rest import Client
 from google import genai
 from google.genai import types
 
@@ -17,13 +18,17 @@ app = Flask(__name__)
 
 # ── Clients ──────────────────────────────────────────────────────────────────
 gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+twilio_client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
 twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME = "Sidi Bebe"
-GEMINI_MODEL = "gemini-2.0-flash"
+COFFEE_SHOP_NAME  = "Brew & Co."
+GEMINI_MODEL      = "gemini-2.0-flash"
+TWILIO_NUMBER     = os.environ["TWILIO_NUMBER"]
+YOUR_PHONE_NUMBER = os.environ["YOUR_PHONE_NUMBER"]
+RENDER_URL        = os.environ["RENDER_URL"]
 
-SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi Bebe
+SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Brew & Co.
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -40,8 +45,9 @@ RULES:
 - Be warm and conversational
 - Ask clarifying questions one at a time (size, milk, extras)
 - When the order is complete, confirm it with the total price
-- End your confirmation message with: "Is there anything else I can help you with?"
-- If they say no or goodbye, end with exactly: "CALL_COMPLETE: [order summary]"
+- Ask the customer to confirm the order vocally (say yes or no)
+- If they confirm with yes, end with exactly: "CALL_COMPLETE: [order summary with total]"
+- If they say no, ask what they would like to change
 - Never make up menu items or prices
 - If asked something off-topic, politely redirect to coffee ordering"""
 
@@ -51,7 +57,6 @@ sessions: dict[str, list] = {}
 
 # ── Twilio signature validation ───────────────────────────────────────────────
 def validate_twilio_request(f):
-    """Decorator — rejects any request that didn't genuinely come from Twilio."""
     @wraps(f)
     def decorated(*args, **kwargs):
         url = request.url
@@ -69,7 +74,6 @@ def ask_gemini(call_sid: str, user_message: str) -> str:
     if call_sid not in sessions:
         sessions[call_sid] = []
 
-    # Append user turn
     sessions[call_sid].append(
         types.Content(role="user", parts=[types.Part(text=user_message)])
     )
@@ -85,7 +89,6 @@ def ask_gemini(call_sid: str, user_message: str) -> str:
 
     reply = response.text.strip()
 
-    # Append assistant turn
     sessions[call_sid].append(
         types.Content(role="model", parts=[types.Part(text=reply)])
     )
@@ -93,7 +96,7 @@ def ask_gemini(call_sid: str, user_message: str) -> str:
     return reply
 
 
-def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
+def twiml_response(text: str, gather: bool = True, timeout: int = 8) -> str:
     """Build a TwiML response that speaks text and optionally listens."""
     response = VoiceResponse()
 
@@ -125,20 +128,36 @@ def twiml_response(text: str, gather: bool = True, timeout: int = 5) -> str:
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check for Render."""
+    """Health check — also warms up the server."""
     return {"status": "ok", "agent": COFFEE_SHOP_NAME}, 200
+
+
+@app.route("/call-me", methods=["GET"])
+def call_me():
+    """Visit this URL in your browser → Twilio calls your phone immediately."""
+    call = twilio_client.calls.create(
+        to=YOUR_PHONE_NUMBER,
+        from_=TWILIO_NUMBER,
+        url=f"{RENDER_URL}/incoming-call",
+    )
+    return jsonify({
+        "status": "calling",
+        "message": f"📞 Calling {YOUR_PHONE_NUMBER} now — pick up!",
+        "call_sid": call.sid,
+    })
 
 
 @app.route("/incoming-call", methods=["POST"])
 @validate_twilio_request
 def incoming_call():
-    """Twilio hits this endpoint when someone calls your number."""
+    """Twilio hits this when the call connects."""
     call_sid = request.form.get("CallSid", "unknown")
     sessions.pop(call_sid, None)
 
     greeting = (
-        f"Hi, welcome to {COFFEE_SHOP_NAME}! "
-        "I'm your virtual barista. What can I get started for you today?"
+        f"Hi! Welcome to {COFFEE_SHOP_NAME}. "
+        "I'm your virtual barista. "
+        "What can I get started for you today?"
     )
     return Response(twiml_response(greeting), mimetype="text/xml")
 
@@ -151,7 +170,7 @@ def respond():
     speech_result = request.form.get("SpeechResult", "").strip()
 
     if not speech_result:
-        fallback = "Sorry, I didn't catch that. Could you repeat your order?"
+        fallback = "Sorry, I didn't catch that. Could you repeat that please?"
         return Response(twiml_response(fallback), mimetype="text/xml")
 
     print(f"[{call_sid}] Customer: {speech_result}")
@@ -163,9 +182,9 @@ def respond():
     if reply.startswith("CALL_COMPLETE:"):
         order_summary = reply.replace("CALL_COMPLETE:", "").strip()
         farewell = (
-            f"Perfect! So your order is: {order_summary}. "
-            "Your order has been placed. Thank you for calling Sidi Bebe "
-            "See you soon!"
+            f"Perfect! {order_summary}. "
+            "Your order has been placed. "
+            "Thank you for calling Brew & Co. See you soon!"
         )
         sessions.pop(call_sid, None)
         return Response(twiml_response(farewell, gather=False), mimetype="text/xml")
