@@ -1,7 +1,7 @@
 """
 ☕ Coffee Order AI Voice Agent
 --------------------------------
-Stack: Twilio (calls) + Gemini AI (brain) + Flask (server)
+Stack: Twilio (calls) + Claude AI (brain) + Flask (server)
 Deploy: Render.com (free tier)
 """
 
@@ -11,24 +11,23 @@ from flask import Flask, request, Response, abort, jsonify
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
-from google import genai
-from google.genai import types
+import anthropic
 
 app = Flask(__name__)
 
 # ── Clients ──────────────────────────────────────────────────────────────────
-gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 twilio_client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
 twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME  = "Sidi BeBe."
-GEMINI_MODEL      = "gemini-1.5-flash"
+COFFEE_SHOP_NAME  = "Brew & Co."
+CLAUDE_MODEL      = "claude-sonnet-4-20250514"
 TWILIO_NUMBER     = os.environ["TWILIO_NUMBER"]
 YOUR_PHONE_NUMBER = os.environ["YOUR_PHONE_NUMBER"]
 RENDER_URL        = os.environ["RENDER_URL"]
 
-SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi BeBe.
+SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Brew & Co.
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -51,7 +50,7 @@ RULES:
 - Never make up menu items or prices
 - If asked something off-topic, politely redirect to coffee ordering"""
 
-# In-memory session store { call_sid: [history] }
+# In-memory session store { call_sid: [messages] }
 sessions: dict[str, list] = {}
 
 
@@ -69,29 +68,23 @@ def validate_twilio_request(f):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def ask_gemini(call_sid: str, user_message: str) -> str:
-    """Send user message to Gemini, maintain conversation history per call."""
+def ask_claude(call_sid: str, user_message: str) -> str:
+    """Send user message to Claude, maintain conversation history per call."""
     if call_sid not in sessions:
         sessions[call_sid] = []
 
-    sessions[call_sid].append(
-        types.Content(role="user", parts=[types.Part(text=user_message)])
+    sessions[call_sid].append({"role": "user", "content": user_message})
+
+    response = claude.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=200,
+        system=SYSTEM_PROMPT,
+        messages=sessions[call_sid],
     )
 
-    response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=sessions[call_sid],
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=200,
-        ),
-    )
+    reply = response.content[0].text.strip()
 
-    reply = response.text.strip()
-
-    sessions[call_sid].append(
-        types.Content(role="model", parts=[types.Part(text=reply)])
-    )
+    sessions[call_sid].append({"role": "assistant", "content": reply})
 
     return reply
 
@@ -175,7 +168,7 @@ def respond():
 
     print(f"[{call_sid}] Customer: {speech_result}")
 
-    reply = ask_gemini(call_sid, speech_result)
+    reply = ask_claude(call_sid, speech_result)
 
     print(f"[{call_sid}] Agent: {reply}")
 
@@ -184,7 +177,7 @@ def respond():
         farewell = (
             f"Perfect! {order_summary}. "
             "Your order has been placed. "
-            "Thank you for calling Sidi BeBe. See you soon!"
+            "Thank you for calling Brew & Co. See you soon!"
         )
         sessions.pop(call_sid, None)
         return Response(twiml_response(farewell, gather=False), mimetype="text/xml")
