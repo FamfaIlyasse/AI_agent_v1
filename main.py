@@ -22,13 +22,13 @@ twilio_client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH
 twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
-COFFEE_SHOP_NAME  = "Brew & Co."
+COFFEE_SHOP_NAME  = "Sidi BeBe."
 GEMINI_MODEL      = "gemini-1.5-flash"
 TWILIO_NUMBER     = os.environ["TWILIO_NUMBER"]
 YOUR_PHONE_NUMBER = os.environ["YOUR_PHONE_NUMBER"]
 RENDER_URL        = os.environ["RENDER_URL"]
 
-SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Brew & Co.
+SYSTEM_PROMPT = """You are a friendly voice assistant for a coffee shop called Sidi BeBe.
 Your job is to take customer coffee orders over the phone.
 
 MENU:
@@ -184,7 +184,7 @@ def respond():
         farewell = (
             f"Perfect! {order_summary}. "
             "Your order has been placed. "
-            "Thank you for calling Brew & Co. See you soon!"
+            "Thank you for calling Sidi BeBe. See you soon!"
         )
         sessions.pop(call_sid, None)
         return Response(twiml_response(farewell, gather=False), mimetype="text/xml")
