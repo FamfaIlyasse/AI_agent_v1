@@ -22,7 +22,7 @@ twilio_validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
 COFFEE_SHOP_NAME  = "Brew & Co."
-CLAUDE_MODEL      = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL      = "claude-haiku-4-5"
 TWILIO_NUMBER     = os.environ["TWILIO_NUMBER"]
 YOUR_PHONE_NUMBER = os.environ["YOUR_PHONE_NUMBER"]
 RENDER_URL        = os.environ["RENDER_URL"]
